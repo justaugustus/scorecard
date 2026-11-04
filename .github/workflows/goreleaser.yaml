@@ -72,44 +72,87 @@ jobs:
           echo "hashes=$(cat $checksum_file | base64 -w0)" >> "$GITHUB_OUTPUT"
 
   provenance:
+    # Keep needs: the attester then starts after goreleaser finishes, so
+    # the timeout clock and job-name matching can't race the build
+    # (findings 7 and 11).
     needs: [goreleaser]
     permissions:
-      actions: read # To read the workflow path.
-      id-token: write # To sign the provenance.
-      contents: write # To add assets to a release.
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+      id-token: write # sigstore keyless signing
+      actions: read   # read the run's jobs
+      contents: read  # read the repository
+    uses: slsa-framework/actions/.github/workflows/attest_actions.yml@3efdf6f2112b1170cb369442620788752df11bca # v0.2.0
     with:
-      base64-subjects: "${{ needs.goreleaser.outputs.hashes }}"
-      upload-assets: true # upload to a new release
+      # Required: publish and verification depend on this job, so
+      # watching them would deadlock (finding 2).
+      watch-jobs: goreleaser
+      # goreleaser publishes straight to the release. No workflow
+      # artifacts are uploaded.
+      collect-artifacts: false
+      release: ${{ github.ref_name }}
+      # Archives plus scorecard_checksums.txt. This drops an
+      # attestations.intoto.jsonl left by an earlier attempt
+      # (finding 6).
+      artifacts-filter: "scorecard_*"
+      # Run the released, provenance-verified attester, not the
+      # unpinned tip (finding 1).
+      build-from-source: false
+      version: v0.1.1
+
+  publish:
+    needs: [goreleaser, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload the attestation to the release
+    steps:
+      - name: Download the attestation
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: slsa-attestations
+      - name: Publish provenance to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mv provenance.intoto.json attestations.intoto.jsonl
+          gh release upload "$GITHUB_REF_NAME" attestations.intoto.jsonl \
+            --repo "$GITHUB_REPOSITORY"
 
   verification:
-    needs: [goreleaser, provenance]
+    needs: [goreleaser, publish]
     runs-on: ubuntu-latest
     permissions: read-all
     steps:
       - name: Install the verifier
-        uses: slsa-framework/slsa-verifier/actions/installer@ea584f4502babc6f60d9bc799dbbb13c1caa9ee6 # v2.7.1
+        uses: slsa-framework/actions/install/verifier@3efdf6f2112b1170cb369442620788752df11bca # v0.2.0
+        with:
+          version: v0.1.1
 
       - name: Download assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PROVENANCE: "${{ needs.provenance.outputs.provenance-name }}"
         run: |
           set -euo pipefail
           gh -R "$GITHUB_REPOSITORY" release download "$GITHUB_REF_NAME" -p "*.tar.gz"
-          gh -R "$GITHUB_REPOSITORY" release download "$GITHUB_REF_NAME" -p "$PROVENANCE"
+          gh -R "$GITHUB_REPOSITORY" release download "$GITHUB_REF_NAME" -p "attestations.intoto.jsonl"
+
       - name: Verify assets
         env:
           CHECKSUMS: ${{ needs.goreleaser.outputs.hashes }}
-          PROVENANCE: "${{ needs.provenance.outputs.provenance-name }}"
+          # The SHA in the uses: line above becomes the signer
+          # identity's ref (migration-generator.md:280-282).
+          SIGNER: "sigstore::https://token.actions.githubusercontent.com::https://github.com/slsa-framework/actions/.github/workflows/attest_actions.yml@3efdf6f2112b1170cb369442620788752df11bca"
         run: |
           set -euo pipefail
-          checksums=$(echo "$CHECKSUMS" | base64 -d)
-          while read -r line; do
-              fn=$(echo $line | cut -d ' ' -f2)
-              echo "Verifying $fn"
-              slsa-verifier verify-artifact --provenance-path "$PROVENANCE" \
-                                            --source-uri "github.com/$GITHUB_REPOSITORY" \
-                                            --source-tag "$GITHUB_REF_NAME" \
-                                            "$fn"
-          done <<<"$checksums"
+          # Pinning the builder to the tag ref is what binds the result to
+          # this tag: verifier v0.1.1 skips expected_tag for attester
+          # provenance. -v lists skipped controls so the run shows it.
+          builder="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/goreleaser.yaml@${GITHUB_REF}"
+          echo "$CHECKSUMS" | base64 -d | awk '{print $2}' | while read -r fn; do
+            echo "Verifying $fn"
+            slsa-verifier build attestations.intoto.jsonl "$fn" \
+              --param "expected_source:github.com/${GITHUB_REPOSITORY}" \
+              --param "expected_tag:${GITHUB_REF_NAME}" \
+              --param "trusted_builders:[${builder}]" \
+              --signer "$SIGNER" \
+              --require-signatures --level 3 -v
+          done
