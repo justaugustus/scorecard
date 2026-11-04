@@ -73,8 +73,7 @@ jobs:
 
   provenance:
     # Keep needs: the attester then starts after goreleaser finishes, so
-    # the timeout clock and job-name matching can't race the build
-    # (findings 7 and 11).
+    # the timeout clock and job-name matching can't race the build.
     needs: [goreleaser]
     permissions:
       id-token: write # sigstore keyless signing
@@ -83,18 +82,17 @@ jobs:
     uses: slsa-framework/actions/.github/workflows/attest_actions.yml@3efdf6f2112b1170cb369442620788752df11bca # v0.2.0
     with:
       # Required: publish and verification depend on this job, so
-      # watching them would deadlock (finding 2).
+      # watching them would deadlock.
       watch-jobs: goreleaser
       # goreleaser publishes straight to the release. No workflow
       # artifacts are uploaded.
       collect-artifacts: false
       release: ${{ github.ref_name }}
       # Archives plus scorecard_checksums.txt. This drops an
-      # attestations.intoto.jsonl left by an earlier attempt
-      # (finding 6).
+      # attestations.intoto.jsonl left by an earlier attempt.
       artifacts-filter: "scorecard_*"
       # Run the released, provenance-verified attester, not the
-      # unpinned tip (finding 1).
+      # unpinned tip.
       build-from-source: false
       version: v0.1.1
 
