@@ -254,7 +254,7 @@ $(KOCACHE_PATH):
 scorecard-ko: ## Build the scorecard ko image
 scorecard-ko: | $(KO) $(KOCACHE_PATH)
 	KO_DATA_DATE_EPOCH=$(SOURCE_DATE_EPOCH) \
-			   KO_DOCKER_REPO=ghcr.io/ossf/scorecard \
+			   KO_DOCKER_REPO=ghcr.io/justaugustus/scorecard \
 			   LDFLAGS="$(LDFLAGS)" \
 			   KO_CACHE=$(KOCACHE_PATH) \
 			   $(KO) build --bare \
